@@ -1,13 +1,17 @@
 import os
+from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from groq import Groq
 
-# 1. 填入你的两把钥匙 (确保不要把引号删掉)
-TELEGRAM_BOT_TOKEN = '8943658198:AAEaBgmsEetTUDEjizhxNG8dTI7ZQaT9u7g'
-GROQ_API_KEY = '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'
+# 这一句非常关键，它会把你的 .env 文件里的秘密加载到系统里！
+load_dotenv()
 
-# 初始化 Groq 客户端 (连接免费的云端大脑)
+# 现在你可以优雅地从 .env 里拿钥匙了，不需要把密码明文写在这里
+TELEGRAM_BOT_TOKEN = os.getenv('BOT_TOKEN')
+GROQ_API_KEY = os.getenv('API_KEY')
+
+# 下面的代码保持不变...
 client = Groq(api_key=GROQ_API_KEY)
 
 
