@@ -4,8 +4,8 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 from groq import Groq
 
 # 1. 填入你的两把钥匙 (确保不要把引号删掉)
-TELEGRAM_BOT_TOKEN = '8943658198:AAEaBgmsEetTUDEjizhxNG8dTI7ZQaT9u7g'
-GROQ_API_KEY = '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'
+TELEGRAM_BOT_TOKEN = 'BOT_TOKEN'
+GROQ_API_KEY = 'API_KEY'
 
 # 初始化 Groq 客户端 (连接免费的云端大脑)
 client = Groq(api_key=GROQ_API_KEY)
