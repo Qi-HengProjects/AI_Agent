@@ -1,73 +1,61 @@
 import os
+import json
+import logging
+import sys
+from datetime import datetime, timezone, timedelta
+from groq import AsyncGroq
 from dotenv import load_dotenv
 from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-from groq import Groq
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes, CallbackContext
 
-# 这一句非常关键，它会把你的 .env 文件里的秘密加载到系统里！
+#setting up
 load_dotenv()
 
-# 现在你可以优雅地从 .env 里拿钥匙了，不需要把密码明文写在这里
 TELEGRAM_BOT_TOKEN = os.getenv('BOT_TOKEN')
 GROQ_API_KEY = os.getenv('API_KEY')
+groq_client = AsyncGroq(api_key=GROQ_API_KEY)
+MODEL_NAME = "openai/gpt-oss-120b"
 
-# 下面的代码保持不变...
-client = Groq(api_key=GROQ_API_KEY)
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+
+if not TELEGRAM_BOT_TOKEN or not GROQ_API_KEY:
+    logging.critical("Did not detect any telegram bot token or api key") #highest level of system issue
+    sys.exit(1)
 
 
-# 2. 定义大模型处理函数
-def ask_groq(user_message):
-    try:
-        # 使用 Llama 3 8B 模型 (速度极快)
-        chat_completion = client.chat.completions.create(
-            messages=[
-                {
-                    "role": "system",
-                    "content": "你是一个幽默、专业的 AI 助手。请用简明扼要的中文回答用户的问题。"
-                },
-                {
-                    "role": "user",
-                    "content": user_message
+
+#setting up tools for the agent
+def get_current_time(tz_offset_hours: int = 8) -> str: #return type is string
+    #get accurate current date and time
+    tz = timezone(timedelta(hours=tz_offset_hours))
+    current_time = datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S")
+    return json.dumps({"current_time": current_time, "timezone_offset": f"UTC+{tz_offset_hours}"})
+
+AVAILABLE_FUNCTIONS = {
+    "get_current_time": get_current_time,
+}
+
+# tools (follow the structure of Groq / OpenAI)
+TOOLS_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "get_current_time",
+        "description": "Get the current time and date. Default return UTC+8.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "tz_offset_hours": {
+                    "type":"integer",
+                    "description": "The offset of different time zone."
                 }
-            ],
-            model="llama-3.3-70b-versatile",
-        )
-        return chat_completion.choices[0].message.content
-    except Exception as e:
-        return f"大脑连接出错啦: {e}"
+            },
+            "required": []
+        }
+    }
+}
 
+#core agent stop and executing
 
-# 3. 定义 Telegram 处理指令
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # 当用户发送 /start 时回复
-    await update.message.reply_text('你好！我是你的云端 AI 助手，随便问我点什么吧！')
-
-
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # 接收用户的文字
+async def handle_message(update: Update, context: ContextTypes):
     user_text = update.message.text
-    print(f"收到消息: {user_text}")
-
-    # 给用户发一个 "正在输入..." 的状态
-    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action='typing')
-
-    # 把文字丢给 Groq 大脑
-    ai_response = ask_groq(user_text)
-
-    # 将 AI 的回答发送回 Telegram
-    await update.message.reply_text(ai_response)
-
-
-# 4. 主函数：启动机器人
-if __name__ == '__main__':
-    print("机器人正在启动... 请到 Telegram 给它发消息！")
-
-    # 建立 Application 实例
-    app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
-
-    # 绑定事件
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-
-    # 开始持续监听 Telegram
-    app.run_polling()
+    chat_id = update.message.chat_id
