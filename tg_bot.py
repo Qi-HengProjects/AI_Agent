@@ -5,11 +5,13 @@ import sys
 from datetime import datetime, timezone, timedelta
 import yfinance as yf
 import asyncio
+import requests
 
-import tree_sitter_c_sharp
+from duckduckgo_search import DDGS
+from bs4 import BeautifulSoup
 from groq import AsyncGroq
 from dotenv import load_dotenv
-from huggingface_hub.cli.inference_endpoints import update
+
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes, CallbackContext
 
@@ -61,9 +63,59 @@ def get_stocks_price(ticker: str) -> str:
             "message": f"Unable to get stock price for {ticker}, reason: {str(e)}"
         })
 
+def scrape_webpage(url: str) -> str:
+    try:
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+        response = requests.get(url, headers=headers, timeout=10)
+        soup = BeautifulSoup(response.text, 'html.parser')
+
+        if response.status_code != 200:
+            return json.dumps({
+                "url": url,
+                "status": "error",
+                "message": f"Unable to scrape webpage for {url}, reason: {str(response.status_code)}"
+            })
+
+        soup = BeautifulSoup(response.text, 'html.parser')
+        paragraphs = [p.get_text(strip=True) for p in soup.find_all('p')]
+
+        full_text = " ".join(paragraphs)
+        partial_text = full_text[:5000]
+        return json.dumps({
+            "full_text": partial_text,
+            "status": "success"
+            })
+
+    except Exception as e:
+        return json.dumps({
+            "url": url,
+            "status": "error",
+            "message": f"Unable to scrape webpage for {url}, reason: {str(e)}"
+        })
+
+
+# def search_telegram_groups(keyword: str) -> str:
+#     try:
+#         exact_query = f"{keyword} site:t.me"
+#         with DDGS() as ddgs:
+#             result = list(ddgs.text(exact_query, max_results=3))
+#             return json.dumps({
+#                 "result": result,
+#                 "status": "success"
+#                 })
+#     except Exception as e:
+#         return json.dumps({
+#             "keyword": keyword,
+#             "status": "error",
+#             "message":  f"Unable to find telegram group for {keyword}, reason: {str(e)}"
+#         })
+
+
 AVAILABLE_FUNCTIONS = {
     "get_current_time": get_current_time,
     "get_stocks_price": get_stocks_price,
+    "scrape_webpage": scrape_webpage,
+    # "search_telegram_groups": search_telegram_groups,
 }
 
 
@@ -105,10 +157,42 @@ STOCK_TOOL_SCHEMA = {
     }
 }
 
+SCRAPE_TOOL_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "scrape_webpage",
+        "description": "读取并抓取指定 URL 网页上的核心纯文本内容。当用户提供链接，或需要了解某个网页的具体内容时调用。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "description": "需要抓取的完整网页链接，必须以 http 或 https 开头。"}
+            },
+            "required": ["url"]
+        }
+    }
+}
+
+# SEARCH_TG_TOOL_SCHEMA = {
+#     "type": "function",
+#     "function": {
+#         "name": "search_telegram_groups",
+#         "description": "通过搜索引擎查找相关的 Telegram 群组或频道的加入链接。当用户寻找特定主题的 TG 群时调用。",
+#         "parameters": {
+#             "type": "object",
+#             "properties": {
+#                 "keyword": {"type": "string", "description": "用户想要寻找的群组主题关键字，例如 'Python 交流' 或 '吉隆坡 租房'。"}
+#             },
+#             "required": ["keyword"]
+#         }
+#     }
+# }
+
 # The array schema wrapper required by Groq/OpenAI architecture gateway
 TOOLS_SCHEMA = [
     TIME_TOOL_SCHEMA,
     STOCK_TOOL_SCHEMA,
+    SCRAPE_TOOL_SCHEMA,
+    # SEARCH_TG_TOOL_SCHEMA,
 ]
 
 
@@ -172,9 +256,27 @@ async def handle_message(update: Update, context: ContextTypes):
                     })
 
             # PHASE 3: Re-submit enriched context back to LLM for final synthesis translation
+            logging.info("Clear context only execute")
+
+            tool_result_text = ""
+            for msg in messages:
+                if msg.get("role") == "tool":
+                    tool_result_text +=f"\n- found data:{msg.get('content')}"
+
+            summary_messages = [
+                {
+                    "role": "system",
+                    "content": "You are just an AI assistant tha summarise content, use human language to reply. If the data cannot be found, tell the user the real situation."
+                },
+                {
+                    "role": "user",
+                    "content": f"Original question of the user: {user_text}\n\n tools return: {tool_result_text}"
+                }
+            ]
+
             final_response = await groq_client.chat.completions.create(
                 model=MODEL_NAME,
-                messages=messages
+                messages=summary_messages
             )
 
             await update.message.reply_text(final_response.choices[0].message.content)
