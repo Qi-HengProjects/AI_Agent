@@ -13,12 +13,14 @@ from huggingface_hub.cli.inference_endpoints import update
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes, CallbackContext
 
-#setting up
+
+# SECTION 1: SYSTEM INITIALIZATION & SECURITY CHECK (Fail-Fast)
 load_dotenv()
 
 TELEGRAM_BOT_TOKEN = os.getenv('BOT_TOKEN')
 GROQ_API_KEY = os.getenv('API_KEY')
 
+# Best Practice: Terminate immediately if critical environmental variables are missing
 if not TELEGRAM_BOT_TOKEN or not GROQ_API_KEY:
     logging.critical("Did not detect any telegram bot token or api key") #highest level of system issue
     sys.exit(1)
@@ -26,10 +28,11 @@ if not TELEGRAM_BOT_TOKEN or not GROQ_API_KEY:
 groq_client = AsyncGroq(api_key=GROQ_API_KEY)
 MODEL_NAME = "openai/gpt-oss-120b"
 
+# Configure structured logging format for debugging production metrics
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
 
-#setting up tools for the agent
+# SECTION 2: LOCAL TOOLS DEFINITION (Agent's Execution Layer)
 def get_current_time(tz_offset_hours: int = 8) -> str: #return type is string
     #get accurate current date and time
     tz = timezone(timedelta(hours=tz_offset_hours))
@@ -38,12 +41,14 @@ def get_current_time(tz_offset_hours: int = 8) -> str: #return type is string
 
 def get_stocks_price(ticker: str) -> str:
     try:
+        # Defensive programming: Strip whitespaces and force uppercase
         clean_ticker = ticker.strip().upper()
         stock = yf.Ticker(clean_ticker)
         price = stock.fast_info['last_price']
         currency = stock.fast_info.get('currency', 'USD')
 
         return json.dumps({
+            # Graceful error catching: Feed the error payload to LLM as context rather than crashing
             "ticker": clean_ticker,
             "current_price": round(price, 2),
             "currency": currency,
@@ -61,7 +66,8 @@ AVAILABLE_FUNCTIONS = {
     "get_stocks_price": get_stocks_price,
 }
 
-# tools 1 (follow the structure of Groq / OpenAI)
+
+# SECTION 3: TOOL SCHEMAS DEFINITION (The LLM Manifest Docs)
 TIME_TOOL_SCHEMA = {
     "type": "function",
     "function": {
@@ -94,18 +100,19 @@ STOCK_TOOL_SCHEMA = {
                     "description": "Short form name of a stock, for example, the name of Apple stock is AAPL."
                 }
             },
-            "required": ["ticker"]
+            "required": ["ticker"] # 'ticker' parameter is mandatory for execution
         }
     }
 }
 
+# The array schema wrapper required by Groq/OpenAI architecture gateway
 TOOLS_SCHEMA = [
     TIME_TOOL_SCHEMA,
     STOCK_TOOL_SCHEMA,
 ]
 
-#core agent stop and executing
 
+# SECTION 4: CORE AGENT ORCHESTRATION PIPELINE (Intercept & Route)
 async def handle_message(update: Update, context: ContextTypes):
     user_text = update.message.text
     chat_id = update.message.chat_id
@@ -118,6 +125,7 @@ async def handle_message(update: Update, context: ContextTypes):
     ]
 
     try:
+        # PHASE 1: Send query and tool specs to LLM for initial execution strategy
         response = await groq_client.chat.completions.create(
             model=MODEL_NAME,
             messages=messages,
@@ -127,8 +135,11 @@ async def handle_message(update: Update, context: ContextTypes):
 
         response_message = response.choices[0].message
 
+        # GATEKEEPER: Check if LLM requested a local function invocation signal
         if response_message.tool_calls:
             logging.info("Agent decision: Tools available")
+
+            # API Constraint: Must append the original assistant tool request block back to history array
             messages.append({
                 "role": "assistant",
                 "tool_calls": [
@@ -143,6 +154,7 @@ async def handle_message(update: Update, context: ContextTypes):
                 ]
             })
 
+            # PHASE 2: Local tool execution loop
             for tool_call in response_message.tool_calls:
                 function_name = tool_call.function.name
                 function_args = json.loads(tool_call.function.arguments) if tool_call.function.arguments else {}
@@ -159,6 +171,7 @@ async def handle_message(update: Update, context: ContextTypes):
                         "content": function_response,
                     })
 
+            # PHASE 3: Re-submit enriched context back to LLM for final synthesis translation
             final_response = await groq_client.chat.completions.create(
                 model=MODEL_NAME,
                 messages=messages
@@ -167,20 +180,22 @@ async def handle_message(update: Update, context: ContextTypes):
             await update.message.reply_text(final_response.choices[0].message.content)
 
         else:
+            # PHASE 4: NORMAL CHAT PIPELINE (Handling Vibe & Chunks)
             logging.info("Normal chat")
             chat_reply = response_message.content
 
             if chat_reply:
+                # Telegram Hard Bottleneck: 4096 character threshold. 3500 provides safe margin.
                 MAX_CHUNK_SIZE = 3500
 
-                # 2. 思考题：如果总长度大于安全容量，启动分批发送逻辑
+                # Sliding Window Chunking Strategy to bypass API bottleneck
                 if len(chat_reply) > MAX_CHUNK_SIZE:
                     logging.info(f"Text segmentation: {len(chat_reply)}")
 
                     for i in range(0, len(chat_reply), MAX_CHUNK_SIZE):
                         chunk = chat_reply[i: i + MAX_CHUNK_SIZE]
                         await update.message.reply_text(chunk)
-                        await asyncio.sleep(0.2)
+                        await asyncio.sleep(0.2) # Throttle to prevent Telegram API rate-limit penalty
 
                 else:
                     await update.message.reply_text(chat_reply)
@@ -191,6 +206,8 @@ async def handle_message(update: Update, context: ContextTypes):
         logging.error(f"Error: {e}")
         await update.message.reply_text(f"Sorry there is an error while processing this request: {e}")
 
+
+# SECTION 5: TELEGRAM APPLICATION DAEMON RUNNER
 def main():
     app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
