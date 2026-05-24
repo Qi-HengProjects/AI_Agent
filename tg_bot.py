@@ -4,6 +4,7 @@ import logging
 import sys
 from datetime import datetime, timezone, timedelta
 import yfinance as yf
+import asyncio
 
 import tree_sitter_c_sharp
 from groq import AsyncGroq
@@ -127,6 +128,7 @@ async def handle_message(update: Update, context: ContextTypes):
         response_message = response.choices[0].message
 
         if response_message.tool_calls:
+            logging.info("Agent decision: Tools available")
             messages.append({
                 "role": "assistant",
                 "tool_calls": [
@@ -165,7 +167,25 @@ async def handle_message(update: Update, context: ContextTypes):
             await update.message.reply_text(final_response.choices[0].message.content)
 
         else:
-            await update.message.reply_text(response_message.content)
+            logging.info("Normal chat")
+            chat_reply = response_message.content
+
+            if chat_reply:
+                MAX_CHUNK_SIZE = 3500
+
+                # 2. 思考题：如果总长度大于安全容量，启动分批发送逻辑
+                if len(chat_reply) > MAX_CHUNK_SIZE:
+                    logging.info(f"Text segmentation: {len(chat_reply)}")
+
+                    for i in range(0, len(chat_reply), MAX_CHUNK_SIZE):
+                        chunk = chat_reply[i: i + MAX_CHUNK_SIZE]
+                        await update.message.reply_text(chunk)
+                        await asyncio.sleep(0.2)
+
+                else:
+                    await update.message.reply_text(chat_reply)
+            else:
+                await update.message.reply_text("Sorry, I don't know how to answer that.")
 
     except Exception as e:
         logging.error(f"Error: {e}")
